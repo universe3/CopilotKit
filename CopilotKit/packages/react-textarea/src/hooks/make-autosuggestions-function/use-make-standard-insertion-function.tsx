@@ -1,18 +1,24 @@
-import { Message } from "@copilotkit/shared";
-import { CopilotContext } from "@copilotkit/react-core";
-import { useCallback, useContext } from "react";
-import { MinimalChatGPTMessage } from "../../types";
+import { COPILOT_CLOUD_PUBLIC_API_KEY_HEADER } from "@copilotkit/shared";
+import { useCopilotContext } from "@copilotkit/react-core";
+import { useCallback } from "react";
+import {
+  CopilotRuntimeClient,
+  Message,
+  Role,
+  TextMessage,
+  convertGqlOutputToMessages,
+  convertMessagesToGqlInput,
+  filterAgentStateMessages,
+  CopilotRequestType,
+} from "@copilotkit/runtime-client-gql";
 import { retry } from "../../lib/retry";
 import {
   EditingEditorState,
   Generator_InsertionOrEditingSuggestion,
-  InsertionEditorApiConfig,
-  InsertionEditorState,
 } from "../../types/base/autosuggestions-bare-function";
 import { InsertionsApiConfig } from "../../types/autosuggestions-config/insertions-api-config";
 import { EditingApiConfig } from "../../types/autosuggestions-config/editing-api-config";
 import { DocumentPointer } from "@copilotkit/react-core";
-import { fetchAndDecodeChatCompletionAsText } from "@copilotkit/react-core";
 
 /**
  * Returns a memoized function that sends a request to the specified API endpoint to get an autosuggestion for the user's input.
@@ -33,7 +39,55 @@ export function useMakeStandardInsertionOrEditingFunction(
   insertionApiConfig: InsertionsApiConfig,
   editingApiConfig: EditingApiConfig,
 ): Generator_InsertionOrEditingSuggestion {
-  const { getContextString, copilotApiConfig } = useContext(CopilotContext);
+  const { getContextString, copilotApiConfig } = useCopilotContext();
+  const headers = {
+    ...(copilotApiConfig.publicApiKey
+      ? { [COPILOT_CLOUD_PUBLIC_API_KEY_HEADER]: copilotApiConfig.publicApiKey }
+      : {}),
+  };
+
+  const runtimeClient = new CopilotRuntimeClient({
+    url: copilotApiConfig.chatApiEndpoint,
+    publicApiKey: copilotApiConfig.publicApiKey,
+    headers,
+    credentials: copilotApiConfig.credentials,
+  });
+
+  async function runtimeClientResponseToStringStream(
+    responsePromise: ReturnType<typeof runtimeClient.generateCopilotResponse>,
+  ) {
+    const messagesStream = await CopilotRuntimeClient.asStream(responsePromise);
+
+    return new ReadableStream({
+      async start(controller) {
+        const reader = messagesStream.getReader();
+        let sentContent = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            break;
+          }
+
+          const messages = convertGqlOutputToMessages(value.generateCopilotResponse.messages);
+
+          let newContent = "";
+
+          for (const message of messages) {
+            if (message instanceof TextMessage) {
+              newContent += message.content;
+            }
+          }
+          if (newContent) {
+            const contentToSend = newContent.slice(sentContent.length);
+            controller.enqueue(contentToSend);
+            sentContent += contentToSend;
+          }
+        }
+        controller.close();
+      },
+    });
+  }
 
   const insertionFunction = useCallback(
     async (
@@ -43,39 +97,45 @@ export function useMakeStandardInsertionOrEditingFunction(
       abortSignal: AbortSignal,
     ) => {
       const res = await retry(async () => {
-        const messages: MinimalChatGPTMessage[] = [
-          {
-            role: "system",
+        const messages: Message[] = [
+          new TextMessage({
+            role: Role.System,
             content: insertionApiConfig.makeSystemPrompt(
               textareaPurpose,
               getContextString(documents, contextCategories),
             ),
-          },
+          }),
           ...insertionApiConfig.fewShotMessages,
-          {
-            role: "user",
-            name: "TextAfterCursor",
-            content: editorState.textAfterCursor,
-          },
-          {
-            role: "user",
-            name: "TextBeforeCursor",
-            content: editorState.textBeforeCursor,
-          },
-          {
-            role: "user",
-            name: "InsertionPrompt",
-            content: insertionPrompt,
-          },
+          new TextMessage({
+            role: Role.User,
+            content: `<TextAfterCursor>${editorState.textAfterCursor}</TextAfterCursor>`,
+          }),
+          new TextMessage({
+            role: Role.User,
+            content: `<TextBeforeCursor>${editorState.textBeforeCursor}</TextBeforeCursor>`,
+          }),
+          new TextMessage({
+            role: Role.User,
+            content: `<InsertionPrompt>${insertionPrompt}</InsertionPrompt>`,
+          }),
         ];
 
-        const stream = await fetchAndDecodeChatCompletionAsText({
-          messages: messages as Message[],
-          ...insertionApiConfig.forwardedParams,
-          copilotConfig: copilotApiConfig,
-          signal: abortSignal,
-        });
-        return stream.events!;
+        return runtimeClientResponseToStringStream(
+          runtimeClient.generateCopilotResponse({
+            data: {
+              frontend: {
+                actions: [],
+                url: window.location.href,
+              },
+              messages: convertMessagesToGqlInput(filterAgentStateMessages(messages)),
+              metadata: {
+                requestType: CopilotRequestType.TextareaCompletion,
+              },
+            },
+            properties: copilotApiConfig.properties,
+            signal: abortSignal,
+          }),
+        );
       });
 
       return res;
@@ -91,44 +151,56 @@ export function useMakeStandardInsertionOrEditingFunction(
       abortSignal: AbortSignal,
     ) => {
       const res = await retry(async () => {
-        const messages: MinimalChatGPTMessage[] = [
-          {
-            role: "system",
+        const messages: Message[] = [
+          new TextMessage({
+            role: Role.System,
             content: editingApiConfig.makeSystemPrompt(
               textareaPurpose,
               getContextString(documents, contextCategories),
             ),
-          },
+          }),
           ...editingApiConfig.fewShotMessages,
-          {
-            role: "user",
-            name: "TextBeforeCursor",
-            content: editorState.textBeforeCursor,
-          },
-          {
-            role: "user",
-            name: "TextToEdit",
-            content: editorState.selectedText,
-          },
-          {
-            role: "user",
-            name: "TextAfterCursor",
-            content: editorState.textAfterCursor,
-          },
-          {
-            role: "user",
-            name: "EditingPrompt",
-            content: editingPrompt,
-          },
+          new TextMessage({
+            role: Role.User,
+            content: `<TextBeforeCursor>${editorState.textBeforeCursor}</TextBeforeCursor>`,
+          }),
+          new TextMessage({
+            role: Role.User,
+            content: `<TextToEdit>${editorState.selectedText}</TextToEdit>`,
+          }),
+          new TextMessage({
+            role: Role.User,
+            content: `<TextAfterCursor>${editorState.textAfterCursor}</TextAfterCursor>`,
+          }),
+          new TextMessage({
+            role: Role.User,
+            content: `<EditingPrompt>${editingPrompt}</EditingPrompt>`,
+          }),
         ];
 
-        const stream = await fetchAndDecodeChatCompletionAsText({
-          messages: messages as Message[],
-          ...editingApiConfig.forwardedParams,
-          copilotConfig: copilotApiConfig,
-          signal: abortSignal,
+        const runtimeClient = new CopilotRuntimeClient({
+          url: copilotApiConfig.chatApiEndpoint,
+          publicApiKey: copilotApiConfig.publicApiKey,
+          headers,
+          credentials: copilotApiConfig.credentials,
         });
-        return stream.events!;
+
+        return runtimeClientResponseToStringStream(
+          runtimeClient.generateCopilotResponse({
+            data: {
+              frontend: {
+                actions: [],
+                url: window.location.href,
+              },
+              messages: convertMessagesToGqlInput(filterAgentStateMessages(messages)),
+              metadata: {
+                requestType: CopilotRequestType.TextareaCompletion,
+              },
+            },
+            properties: copilotApiConfig.properties,
+            signal: abortSignal,
+          }),
+        );
       });
 
       return res;

@@ -1,29 +1,33 @@
-import { useRef, useState } from "react";
+import { useRef } from "react";
+import {
+  FunctionCallHandler,
+  COPILOT_CLOUD_PUBLIC_API_KEY_HEADER,
+  actionParametersToJsonSchema,
+  CoagentActionHandler,
+} from "@copilotkit/shared";
 import {
   Message,
-  ToolDefinition,
-  FunctionCallHandler,
-  encodeResult,
-  FunctionCall,
-} from "@copilotkit/shared";
+  TextMessage,
+  ActionExecutionMessage,
+  ResultMessage,
+  CopilotRuntimeClient,
+  convertMessagesToGqlInput,
+  filterAdjacentAgentStateMessages,
+  filterAgentStateMessages,
+  convertGqlOutputToMessages,
+  MessageStatusCode,
+  MessageRole,
+  Role,
+  CopilotRequestType,
+  AgentStateMessage,
+} from "@copilotkit/runtime-client-gql";
 
-import { nanoid } from "nanoid";
-import { fetchAndDecodeChatCompletion } from "../utils/fetch-chat-completion";
 import { CopilotApiConfig } from "../context";
-import untruncateJson from "untruncate-json";
+import { FrontendAction } from "../types/frontend-action";
+import { CoagentState } from "../types/coagent-state";
+import { AgentSession } from "../context/copilot-context";
 
 export type UseChatOptions = {
-  /**
-   * The API endpoint that accepts a `{ messages: Message[] }` object and returns
-   * a stream of tokens of the AI chat response. Defaults to `/api/chat`.
-   */
-  api?: string;
-  /**
-   * A unique identifier for the chat. If not provided, a random one will be
-   * generated. When provided, the `useChat` hook with the same `id` will
-   * have shared states across components.
-   */
-  id?: string;
   /**
    * System messages of the chat. Defaults to an empty array.
    */
@@ -34,32 +38,68 @@ export type UseChatOptions = {
    * automatically to the API and will be used to update the chat.
    */
   onFunctionCall?: FunctionCallHandler;
+
   /**
-   * HTTP headers to be sent with the API request.
+   * Callback function to be called when a coagent action is received.
    */
-  headers?: Record<string, string> | Headers;
-  /**
-   * Extra body object to be sent with the API request.
-   * @example
-   * Send a `sessionId` to the API along with the messages.
-   * ```js
-   * useChat({
-   *   body: {
-   *     sessionId: '123',
-   *   }
-   * })
-   * ```
-   */
-  body?: object;
+  onCoagentAction?: CoagentActionHandler;
+
   /**
    * Function definitions to be sent to the API.
    */
-  tools?: ToolDefinition[];
+  actions: FrontendAction<any>[];
+
+  /**
+   * The CopilotKit API configuration.
+   */
+  copilotConfig: CopilotApiConfig;
+
+  /**
+   * The current list of messages in the chat.
+   */
+  messages: Message[];
+  /**
+   * The setState-powered method to update the chat messages.
+   */
+  setMessages: React.Dispatch<React.SetStateAction<Message[]>>;
+
+  /**
+   * A callback to get the latest system message.
+   */
+  makeSystemMessageCallback: () => TextMessage;
+
+  /**
+   * Whether the API request is in progress
+   */
+  isLoading: boolean;
+
+  /**
+   * setState-powered method to update the isChatLoading value
+   */
+  setIsLoading: React.Dispatch<React.SetStateAction<boolean>>;
+
+  /**
+   * The current list of coagent states.
+   */
+  coagentStates: Record<string, CoagentState>;
+
+  /**
+   * setState-powered method to update the agent states
+   */
+  setCoagentStates: React.Dispatch<React.SetStateAction<Record<string, CoagentState>>>;
+
+  /**
+   * The current agent session.
+   */
+  agentSession: AgentSession | null;
+
+  /**
+   * setState-powered method to update the agent session
+   */
+  setAgentSession: React.Dispatch<React.SetStateAction<AgentSession | null>>;
 };
 
 export type UseChatHelpers = {
-  /** Current messages in the chat */
-  messages: Message[];
   /**
    * Append a user message to the chat list. This triggers the API call to fetch
    * the assistant's response.
@@ -76,86 +116,132 @@ export type UseChatHelpers = {
    * Abort the current request immediately, keep the generated tokens if any.
    */
   stop: () => void;
-  /** The current value of the input */
-  input: string;
-  /** setState-powered method to update the input value */
-  setInput: React.Dispatch<React.SetStateAction<string>>;
-  /** Whether the API request is in progress */
-  isLoading: boolean;
 };
 
-export type UseChatOptionsWithCopilotConfig = UseChatOptions & {
-  copilotConfig: CopilotApiConfig;
-};
+export function useChat(options: UseChatOptions): UseChatHelpers {
+  const {
+    messages,
+    setMessages,
+    makeSystemMessageCallback,
+    copilotConfig,
+    setIsLoading,
+    initialMessages,
+    isLoading,
+    actions,
+    onFunctionCall,
+    onCoagentAction,
+    setCoagentStates,
+    coagentStates,
+    agentSession,
+    setAgentSession,
+  } = options;
 
-export function useChat(options: UseChatOptionsWithCopilotConfig): UseChatHelpers {
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
   const abortControllerRef = useRef<AbortController>();
   const threadIdRef = useRef<string | null>(null);
   const runIdRef = useRef<string | null>(null);
 
-  const runChatCompletion = async (messages: Message[]): Promise<Message[]> => {
+  const runChatCompletionRef = useRef<(previousMessages: Message[]) => Promise<Message[]>>();
+  // We need to keep a ref of coagent states because of renderAndWait - making sure
+  // the latest state is sent to the API
+  // This is a workaround and needs to be addressed in the future
+  const coagentStatesRef = useRef<Record<string, CoagentState>>(coagentStates);
+  coagentStatesRef.current = coagentStates;
+  const agentSessionRef = useRef<AgentSession | null>(agentSession);
+  agentSessionRef.current = agentSession;
+
+  const publicApiKey = copilotConfig.publicApiKey;
+
+  const headers = {
+    ...(copilotConfig.headers || {}),
+    ...(publicApiKey ? { [COPILOT_CLOUD_PUBLIC_API_KEY_HEADER]: publicApiKey } : {}),
+  };
+
+  const runtimeClient = new CopilotRuntimeClient({
+    url: copilotConfig.chatApiEndpoint,
+    publicApiKey: copilotConfig.publicApiKey,
+    headers,
+    credentials: copilotConfig.credentials,
+  });
+
+  const runChatCompletion = async (previousMessages: Message[]): Promise<Message[]> => {
     setIsLoading(true);
 
-    const newMessages: Message[] = [
-      {
-        id: nanoid(),
-        createdAt: new Date(),
+    // this message is just a placeholder. It will disappear once the first real message
+    // is received
+    let newMessages: Message[] = [
+      new TextMessage({
         content: "",
-        role: "assistant",
-      },
+        role: Role.Assistant,
+      }),
     ];
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
 
-    setMessages([...messages, ...newMessages]);
+    setMessages([...previousMessages, ...newMessages]);
 
-    // add threadId and runId to the body if it exists
-    const copilotConfigBody = options.copilotConfig.body || {};
-    if (threadIdRef.current) {
-      copilotConfigBody.threadId = threadIdRef.current;
-    }
-    if (runIdRef.current) {
-      copilotConfigBody.runId = runIdRef.current;
-    }
+    const systemMessage = makeSystemMessageCallback();
 
-    const messagesWithContext = [...(options.initialMessages || []), ...messages];
-    const response = await fetchAndDecodeChatCompletion({
-      copilotConfig: { ...options.copilotConfig, body: copilotConfigBody },
-      messages: messagesWithContext,
-      tools: options.tools,
-      headers: options.headers,
-      signal: abortController.signal,
-    });
+    const messagesWithContext = [systemMessage, ...(initialMessages || []), ...previousMessages];
 
-    if (response.headers.get("threadid")) {
-      threadIdRef.current = response.headers.get("threadid");
-    }
-
-    if (response.headers.get("runid")) {
-      runIdRef.current = response.headers.get("runid");
-    }
-
-    if (!response.events) {
-      setMessages([
-        ...messages,
-        {
-          id: nanoid(),
-          createdAt: new Date(),
-          content: response.statusText,
-          role: "assistant",
+    const stream = CopilotRuntimeClient.asStream(
+      runtimeClient.generateCopilotResponse({
+        data: {
+          frontend: {
+            actions: actions
+              .filter((action) => !action.disabled)
+              .map((action) => ({
+                name: action.name,
+                description: action.description || "",
+                jsonSchema: JSON.stringify(actionParametersToJsonSchema(action.parameters || [])),
+              })),
+            url: window.location.href,
+          },
+          threadId: threadIdRef.current,
+          runId: runIdRef.current,
+          messages: convertMessagesToGqlInput(filterAgentStateMessages(messagesWithContext)),
+          ...(copilotConfig.cloud
+            ? {
+                cloud: {
+                  ...(copilotConfig.cloud.guardrails?.input?.restrictToTopic?.enabled
+                    ? {
+                        guardrails: {
+                          inputValidationRules: {
+                            allowList:
+                              copilotConfig.cloud.guardrails.input.restrictToTopic.validTopics,
+                            denyList:
+                              copilotConfig.cloud.guardrails.input.restrictToTopic.invalidTopics,
+                          },
+                        },
+                      }
+                    : {}),
+                },
+              }
+            : {}),
+          metadata: {
+            requestType: CopilotRequestType.Chat,
+          },
+          ...(agentSessionRef.current
+            ? {
+                agentSession: agentSessionRef.current,
+              }
+            : {}),
+          agentStates: Object.values(coagentStatesRef.current).map((state) => ({
+            agentName: state.name,
+            state: JSON.stringify(state.state),
+          })),
         },
-      ]);
-      setIsLoading(false);
-      throw new Error("Failed to fetch chat completion");
-    }
+        properties: copilotConfig.properties,
+        signal: abortControllerRef.current?.signal,
+      }),
+    );
 
-    const reader = response.events.getReader();
+    const guardrailsEnabled =
+      copilotConfig.cloud?.guardrails?.input?.restrictToTopic.enabled || false;
 
-    // Whether to feed back the new messages to GPT
-    let feedback = false;
+    const reader = stream.getReader();
+
+    let actionResults: { [id: string]: string } = {};
+    let executedCoagentActions: string[] = [];
 
     try {
       while (true) {
@@ -165,107 +251,149 @@ export function useChat(options: UseChatOptionsWithCopilotConfig): UseChatHelper
           break;
         }
 
-        let currentMessage = Object.assign({}, newMessages[newMessages.length - 1]);
+        if (!value?.generateCopilotResponse) {
+          continue;
+        }
 
-        if (value.type === "content") {
-          if (currentMessage.function_call || currentMessage.role === "function") {
-            // Create a new message if the previous one is a function call or result
-            currentMessage = {
-              id: nanoid(),
-              createdAt: new Date(),
-              content: "",
-              role: "assistant",
-            };
-            newMessages.push(currentMessage);
-          }
-          currentMessage.content += value.content;
-          newMessages[newMessages.length - 1] = currentMessage;
-          setMessages([...messages, ...newMessages]);
-        } else if (value.type === "result") {
-          // When we get a result message, it is already complete
-          currentMessage = {
-            id: nanoid(),
-            role: "function",
-            content: value.content,
-            name: value.name,
-          };
-          newMessages.push(currentMessage);
-          setMessages([...messages, ...newMessages]);
+        threadIdRef.current = value.generateCopilotResponse.threadId || null;
+        runIdRef.current = value.generateCopilotResponse.runId || null;
 
-          // After receiving a result, feed back the new messages to GPT
-          feedback = true;
-        } else if (value.type === "function" || value.type === "partial") {
-          // Create a new message if the previous one is not empty
-          if (
-            currentMessage.content != "" ||
-            currentMessage.function_call ||
-            currentMessage.role == "function"
-          ) {
-            currentMessage = {
-              id: nanoid(),
-              createdAt: new Date(),
-              content: "",
-              role: "assistant",
-            };
-            newMessages.push(currentMessage);
-          }
-          if (value.type === "function") {
-            currentMessage.function_call = {
-              name: value.name,
-              arguments: JSON.stringify(value.arguments),
-              scope: value.scope,
-            };
-          } else if (value.type === "partial") {
-            let partialArguments: any = {};
-            try {
-              partialArguments = JSON.parse(untruncateJson(value.arguments));
-            } catch (e) {}
+        const messages = convertGqlOutputToMessages(
+          filterAdjacentAgentStateMessages(value.generateCopilotResponse.messages),
+        );
 
-            currentMessage.partialFunctionCall = {
-              name: value.name,
-              arguments: partialArguments,
-            };
-          }
+        if (messages.length === 0) {
+          continue;
+        }
 
-          newMessages[newMessages.length - 1] = currentMessage;
-          setMessages([...messages, ...newMessages]);
+        newMessages = [];
 
-          if (value.type === "function") {
-            // Execute the function call
-            try {
-              if (options.onFunctionCall && value.scope === "client") {
-                const result = await options.onFunctionCall(
-                  messages,
-                  currentMessage.function_call as FunctionCall,
-                );
+        // request failed, display error message
+        if (
+          value.generateCopilotResponse.status?.__typename === "FailedResponseStatus" &&
+          value.generateCopilotResponse.status.reason === "GUARDRAILS_VALIDATION_FAILED"
+        ) {
+          newMessages = [
+            new TextMessage({
+              role: MessageRole.Assistant,
+              content: value.generateCopilotResponse.status.details?.guardrailsReason || "",
+            }),
+          ];
+        }
 
-                currentMessage = {
-                  id: nanoid(),
-                  role: "function",
-                  content: encodeResult(result),
-                  name: (currentMessage.function_call! as FunctionCall).name!,
-                };
-                newMessages.push(currentMessage);
-                setMessages([...messages, ...newMessages]);
+        // add messages to the chat
+        else {
+          for (const message of messages) {
+            newMessages.push(message);
+            // execute regular action executions
+            if (
+              message instanceof ActionExecutionMessage &&
+              message.status.code !== MessageStatusCode.Pending &&
+              message.scope === "client" &&
+              onFunctionCall
+            ) {
+              if (!(message.id in actionResults)) {
+                // Do not execute a function call if guardrails are enabled but the status is not known
+                if (guardrailsEnabled && value.generateCopilotResponse.status === undefined) {
+                  break;
+                }
+                // execute action
+                try {
+                  // We update the message state before calling the handler so that the render
+                  // function can be called with `executing` state
+                  setMessages([...previousMessages, ...newMessages]);
 
-                // After a function call, feed back the new messages to GPT
-                feedback = true;
+                  const result = await onFunctionCall({
+                    messages: previousMessages,
+                    name: message.name,
+                    args: message.arguments,
+                  });
+                  actionResults[message.id] = result;
+                } catch (e) {
+                  actionResults[message.id] = `Failed to execute action ${message.name}`;
+                  console.error(`Failed to execute action ${message.name}: ${e}`);
+                }
               }
-            } catch (error) {
-              console.error("Failed to execute function call", error);
-              // TODO: Handle error
-              // this should go to the message itself
+              // add the result message
+              newMessages.push(
+                new ResultMessage({
+                  result: ResultMessage.encodeResult(actionResults[message.id]),
+                  actionExecutionId: message.id,
+                  actionName: message.name,
+                }),
+              );
+            }
+            // execute coagent actions
+            if (
+              message instanceof AgentStateMessage &&
+              !message.active &&
+              !executedCoagentActions.includes(message.id) &&
+              onCoagentAction
+            ) {
+              // Do not execute a coagent action if guardrails are enabled but the status is not known
+              if (guardrailsEnabled && value.generateCopilotResponse.status === undefined) {
+                break;
+              }
+              // execute coagent action
+              await onCoagentAction({
+                name: message.agentName,
+                nodeName: message.nodeName,
+                state: message.state,
+              });
+              executedCoagentActions.push(message.id);
+            }
+          }
+
+          const lastAgentStateMessage = [...messages]
+            .reverse()
+            .find((message) => message instanceof AgentStateMessage);
+
+          if (lastAgentStateMessage) {
+            console.log(lastAgentStateMessage);
+            if (lastAgentStateMessage.running) {
+              setCoagentStates((prevAgentStates) => ({
+                ...prevAgentStates,
+                [lastAgentStateMessage.agentName]: {
+                  name: lastAgentStateMessage.agentName,
+                  state: lastAgentStateMessage.state,
+                  running: lastAgentStateMessage.running,
+                  active: lastAgentStateMessage.active,
+                  threadId: lastAgentStateMessage.threadId,
+                  nodeName: lastAgentStateMessage.nodeName,
+                  runId: lastAgentStateMessage.runId,
+                },
+              }));
+              setAgentSession({
+                threadId: lastAgentStateMessage.threadId,
+                agentName: lastAgentStateMessage.agentName,
+                nodeName: lastAgentStateMessage.nodeName,
+              });
+            } else {
+              setAgentSession(null);
             }
           }
         }
+
+        if (newMessages.length > 0) {
+          // Update message state
+          setMessages([...previousMessages, ...newMessages]);
+        }
       }
 
-      // If we want feedback, run the completion again and return the results
-      if (feedback) {
-        return await runChatCompletion([...messages, ...newMessages]);
-      }
-      // otherwise, return the new messages
-      else {
+      if (
+        // if we have client side results
+        Object.values(actionResults).length ||
+        // or the last message we received is a result
+        (newMessages.length && newMessages[newMessages.length - 1] instanceof ResultMessage)
+      ) {
+        // run the completion again and return the result
+
+        // wait for next tick to make sure all the react state updates
+        // - tried using react-dom's flushSync, but it did not work
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        return await runChatCompletionRef.current!([...previousMessages, ...newMessages]);
+      } else {
         return newMessages.slice();
       }
     } finally {
@@ -273,14 +401,17 @@ export function useChat(options: UseChatOptionsWithCopilotConfig): UseChatHelper
     }
   };
 
+  runChatCompletionRef.current = runChatCompletion;
+
   const runChatCompletionAndHandleFunctionCall = async (messages: Message[]): Promise<void> => {
-    await runChatCompletion(messages);
+    await runChatCompletionRef.current!(messages);
   };
 
   const append = async (message: Message): Promise<void> => {
     if (isLoading) {
       return;
     }
+
     const newMessages = [...messages, message];
     setMessages(newMessages);
     return runChatCompletionAndHandleFunctionCall(newMessages);
@@ -293,9 +424,10 @@ export function useChat(options: UseChatOptionsWithCopilotConfig): UseChatHelper
     let newMessages = [...messages];
     const lastMessage = messages[messages.length - 1];
 
-    if (lastMessage.role === "assistant") {
+    if (lastMessage instanceof TextMessage && lastMessage.role === "assistant") {
       newMessages = newMessages.slice(0, -1);
     }
+
     setMessages(newMessages);
 
     return runChatCompletionAndHandleFunctionCall(newMessages);
@@ -306,12 +438,8 @@ export function useChat(options: UseChatOptionsWithCopilotConfig): UseChatHelper
   };
 
   return {
-    messages,
     append,
     reload,
     stop,
-    isLoading,
-    input,
-    setInput,
   };
 }

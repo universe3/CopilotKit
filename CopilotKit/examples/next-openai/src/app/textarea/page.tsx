@@ -2,8 +2,8 @@
 import {
   CopilotKit,
   DocumentPointer,
+  useCopilotReadable,
   useMakeCopilotDocumentReadable,
-  useMakeCopilotReadable,
 } from "@copilotkit/react-core";
 import { CopilotTextarea, HTMLCopilotTextAreaElement } from "@copilotkit/react-textarea";
 import { useRef } from "react";
@@ -11,7 +11,7 @@ import { useStateWithLocalStorage } from "../utils";
 
 export default function CopilotTextareaDemo() {
   return (
-    <CopilotKit url="/api/copilotkit/openai">
+    <CopilotKit runtimeUrl="/api/copilotkit">
       <TextAreas />
     </CopilotKit>
   );
@@ -37,7 +37,11 @@ function TextAreas() {
   );
 
   const salesReplyCategoryId = "sales_reply";
-  useMakeCopilotReadable(detailsText, undefined, [salesReplyCategoryId]);
+  useCopilotReadable({
+    description: "Details Text",
+    value: detailsText,
+    categories: [salesReplyCategoryId],
+  });
 
   const copilotTextareaRef = useRef<HTMLCopilotTextAreaElement>(null);
 
@@ -69,10 +73,8 @@ function TextAreas() {
             suggestionsApiConfig: {
               // makeSystemPrompt: makeSystemPrompt,
               // fewShotMessages: fewShotMessages,
-              forwardedParams: {
-                max_tokens: 5,
-                stop: ["\n", ".", ","],
-              },
+              maxTokens: 5,
+              stop: ["\n", ".", ","],
             },
             insertionApiConfig: {},
           },
@@ -126,20 +128,3 @@ function TextAreas() {
 // \`\`\`
 // `;
 // };
-
-// const fewShotMessages: MinimalChatGPTMessage[] = [
-//   {
-//     role: "user",
-//     content: "",
-//     name: "TextAfterCursor",
-//   },
-//   {
-//     role: "user",
-//     content: "Introducing:",
-//     name: "TextBeforeCursor",
-//   },
-//   {
-//     role: "assistant",
-//     content: "<CopilotTextarea />",
-//   },
-// ];

@@ -1,9 +1,0 @@
-{
-  "name": "tsconfig",
-  "version": "0.14.0-function-calling-fixes.2",
-  "private": true,
-  "license": "MIT",
-  "publishConfig": {
-    "access": "public"
-  }
-}

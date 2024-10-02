@@ -21,7 +21,7 @@ echo ""
 # Remove prev project and run create-next-app
 rm -rf $NEXT_APP_PATH
 if [ "$pkg_manager" = "yarn" ]; then
-    yarn create next-app $NEXT_APP_PATH --ts --eslint --no-tailwind --src-dir --app --import-alias="@/*"
+    (cd /tmp && yarn create next-app $NEXT_APP_PATH --ts --eslint --no-tailwind --src-dir --app --import-alias="@/*")
 elif [ "$pkg_manager" = "npm" ]; then
     npx create-next-app $NEXT_APP_PATH --ts --eslint --use-npm --no-tailwind --src-dir --app --import-alias="@/*"
 fi
@@ -88,7 +88,8 @@ prompt "Ask for a long message. Does the custom render work & stream?"
 prompt "Does it provide the current message when asked?"
 prompt "Test the keyboard shortcut cmd-\\ to open close the sidebar. Does it work?"
 prompt "Does the text input autofocus when the sidebar is opened?"
-prompt "In the text area, start a text about elephants. Does the autosuggestions work?"
+prompt "In the text area, start a text about elephants. Do the autosuggestions work?"
+prompt "Verify that the text area also completes text in the middle of the sentence."
 
 killall next-server;
 

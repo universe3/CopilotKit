@@ -1,21 +1,69 @@
-import React, { useEffect } from "react";
-import { CopilotChatIcons, ChatContextProvider, CopilotChatLabels } from "./ChatContext";
-import { SystemMessageFunction, useCopilotChat } from "@copilotkit/react-core";
+/**
+ * <br/>
+ * <img src="/images/CopilotChat.gif" width="500" />
+ *
+ * A chatbot panel component for the CopilotKit framework. The component allows for a high degree
+ * of customization through various props and custom CSS.
+ *
+ * ## Install Dependencies
+ *
+ * This component is part of the [@copilotkit/react-ui](https://npmjs.com/package/@copilotkit/react-ui) package.
+ *
+ * ```shell npm2yarn \"@copilotkit/react-ui"\
+ * npm install @copilotkit/react-core @copilotkit/react-ui
+ * ```
+ *
+ * ## Usage
+ *
+ * ```tsx
+ * import { CopilotChat } from "@copilotkit/react-ui";
+ * import "@copilotkit/react-ui/styles.css";
+ *
+ * <CopilotChat
+ *   labels={{
+ *     title: "Your Assistant",
+ *     initial: "Hi! 👋 How can I assist you today?",
+ *   }}
+ * />
+ * ```
+ *
+ * ### Look & Feel
+ *
+ * By default, CopilotKit components do not have any styles. You can import CopilotKit's stylesheet at the root of your project:
+ * ```tsx fileName="YourRootComponent.tsx" {2}
+ * ...
+ * import "@copilotkit/react-ui/styles.css";
+ *
+ * export function YourRootComponent() {
+ *   return (
+ *     <CopilotKit>
+ *       ...
+ *     </CopilotKit>
+ *   );
+ * }
+ * ```
+ * For more information about how to customize the styles, check out the [Customize Look & Feel](/concepts/customize-look-and-feel) guide.
+ */
+
 import {
-  ButtonProps,
-  HeaderProps,
-  WindowProps,
-  MessagesProps,
-  InputProps,
-  ResponseButtonProps,
-} from "./props";
-import { Window as DefaultWindow } from "./Window";
-import { Button as DefaultButton } from "./Button";
-import { Header as DefaultHeader } from "./Header";
+  ChatContext,
+  ChatContextProvider,
+  CopilotChatIcons,
+  CopilotChatLabels,
+} from "./ChatContext";
 import { Messages as DefaultMessages } from "./Messages";
 import { Input as DefaultInput } from "./Input";
-import { nanoid } from "nanoid";
 import { ResponseButton as DefaultResponseButton } from "./Response";
+import { Suggestion } from "./Suggestion";
+import React, { useEffect, useRef, useState } from "react";
+import { SystemMessageFunction, useCopilotChat, useCopilotContext } from "@copilotkit/react-core";
+import { reloadSuggestions } from "./Suggestion";
+import { CopilotChatSuggestion } from "../../types/suggestions";
+import { Message, Role, TextMessage } from "@copilotkit/runtime-client-gql";
+import { InputProps, MessagesProps, ResponseButtonProps } from "./props";
+import { randomId } from "@copilotkit/shared";
+
+import { CopilotDevConsole } from "../dev-console";
 
 /**
  * Props for CopilotChat component.
@@ -32,29 +80,6 @@ export interface CopilotChatProps {
   instructions?: string;
 
   /**
-   * Whether the chat window should be open by default.
-   * @default false
-   */
-  defaultOpen?: boolean;
-
-  /**
-   * If the chat window should close when the user clicks outside of it.
-   * @default true
-   */
-  clickOutsideToClose?: boolean;
-
-  /**
-   * If the chat window should close when the user hits the Escape key.
-   * @default true
-   */
-  hitEscapeToClose?: boolean;
-
-  /**
-   * A callback that gets called when the chat window opens or closes.
-   */
-  onSetOpen?: (open: boolean) => void;
-
-  /**
    * A callback that gets called when the in progress state changes.
    */
   onInProgress?: (inProgress: boolean) => void;
@@ -62,14 +87,7 @@ export interface CopilotChatProps {
   /**
    * A callback that gets called when a new message it submitted.
    */
-  onSubmitMessage?: (message: string) => void;
-
-  /**
-   * The shortcut key to open the chat window.
-   * Uses Command-<shortcut> on a Mac and Ctrl-<shortcut> on Windows.
-   * @default "e"
-   */
-  shortcut?: string;
+  onSubmitMessage?: (message: string) => void | Promise<void>;
 
   /**
    * Icons can be used to set custom icons for the chat window.
@@ -94,21 +112,6 @@ export interface CopilotChatProps {
    * @default true
    */
   showResponseButton?: boolean;
-
-  /**
-   * A custom Window component to use instead of the default.
-   */
-  Window?: React.ComponentType<WindowProps>;
-
-  /**
-   * A custom Button component to use instead of the default.
-   */
-  Button?: React.ComponentType<ButtonProps>;
-
-  /**
-   * A custom Header component to use instead of the default.
-   */
-  Header?: React.ComponentType<HeaderProps>;
 
   /**
    * A custom Messages component to use instead of the default.
@@ -136,75 +139,170 @@ export interface CopilotChatProps {
   children?: React.ReactNode;
 }
 
-export const CopilotChat = ({
+export function CopilotChat({
   instructions,
-  defaultOpen = false,
-  clickOutsideToClose = true,
-  hitEscapeToClose = true,
-  onSetOpen,
   onSubmitMessage,
-  shortcut = "/",
-  icons,
-  labels,
   makeSystemMessage,
   showResponseButton = true,
   onInProgress,
-  Window = DefaultWindow,
-  Button = DefaultButton,
-  Header = DefaultHeader,
   Messages = DefaultMessages,
   Input = DefaultInput,
   ResponseButton = DefaultResponseButton,
   className,
+  icons,
+  labels,
+}: CopilotChatProps) {
+  const context = useCopilotContext();
+
+  useEffect(() => {
+    context.setChatInstructions(instructions || "");
+  }, [instructions]);
+
+  const {
+    visibleMessages,
+    isLoading,
+    currentSuggestions,
+    sendMessage,
+    stopGeneration,
+    reloadMessages,
+  } = useCopilotChatLogic(makeSystemMessage, onInProgress, onSubmitMessage);
+
+  const chatContext = React.useContext(ChatContext);
+  const isVisible = chatContext ? chatContext.open : true;
+
+  return (
+    <WrappedCopilotChat icons={icons} labels={labels} className={className}>
+      <CopilotDevConsole />
+      <Messages messages={visibleMessages} inProgress={isLoading}>
+        {currentSuggestions.length > 0 && (
+          <div>
+            <h6>Suggested:</h6>
+            <div className="suggestions">
+              {currentSuggestions.map((suggestion, index) => (
+                <Suggestion
+                  key={index}
+                  title={suggestion.title}
+                  message={suggestion.message}
+                  partial={suggestion.partial}
+                  className={suggestion.className}
+                  onClick={(message) => sendMessage(message)}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+        {showResponseButton && visibleMessages.length > 0 && (
+          <ResponseButton
+            onClick={isLoading ? stopGeneration : reloadMessages}
+            inProgress={isLoading}
+          />
+        )}
+      </Messages>
+      <Input inProgress={isLoading} onSend={sendMessage} isVisible={isVisible} />
+    </WrappedCopilotChat>
+  );
+}
+
+export function WrappedCopilotChat({
   children,
-}: CopilotChatProps) => {
-  const { visibleMessages, append, reload, stop, isLoading, input, setInput } = useCopilotChat({
-    id: nanoid(),
-    makeSystemMessage,
-    additionalInstructions: instructions,
-  });
+  icons,
+  labels,
+  className,
+}: {
+  children: React.ReactNode;
+  icons?: CopilotChatIcons;
+  labels?: CopilotChatLabels;
+  className?: string;
+}) {
+  const chatContext = React.useContext(ChatContext);
+  if (!chatContext) {
+    return (
+      <ChatContextProvider icons={icons} labels={labels} open={true} setOpen={() => {}}>
+        <div className={`copilotKitChat ${className}`}>{children}</div>
+      </ChatContextProvider>
+    );
+  }
+  return <>{children}</>;
+}
+
+const SUGGESTIONS_DEBOUNCE_TIMEOUT = 1000;
+
+export const useCopilotChatLogic = (
+  makeSystemMessage?: SystemMessageFunction,
+  onInProgress?: (isLoading: boolean) => void,
+  onSubmitMessage?: (messageContent: string) => Promise<void> | void,
+) => {
+  const { visibleMessages, appendMessage, reloadMessages, stopGeneration, isLoading } =
+    useCopilotChat({
+      id: randomId(),
+      makeSystemMessage,
+    });
+
+  const [currentSuggestions, setCurrentSuggestions] = useState<CopilotChatSuggestion[]>([]);
+  const suggestionsAbortControllerRef = useRef<AbortController | null>(null);
+  const debounceTimerRef = useRef<any>();
+
+  const abortSuggestions = () => {
+    suggestionsAbortControllerRef.current?.abort();
+    suggestionsAbortControllerRef.current = null;
+  };
+
+  const context = useCopilotContext();
 
   useEffect(() => {
     onInProgress?.(isLoading);
-  }, [isLoading]);
 
-  const [openState, setOpenState] = React.useState(defaultOpen);
+    abortSuggestions();
 
-  const setOpen = (open: boolean) => {
-    onSetOpen?.(open);
-    setOpenState(open);
-  };
+    debounceTimerRef.current = setTimeout(
+      () => {
+        if (!isLoading && Object.keys(context.chatSuggestionConfiguration).length !== 0) {
+          suggestionsAbortControllerRef.current = new AbortController();
+          reloadSuggestions(
+            context,
+            context.chatSuggestionConfiguration,
+            setCurrentSuggestions,
+            suggestionsAbortControllerRef,
+          );
+        }
+      },
+      currentSuggestions.length == 0 ? 0 : SUGGESTIONS_DEBOUNCE_TIMEOUT,
+    );
 
-  const sendMessage = async (message: string) => {
-    onSubmitMessage?.(message);
-    append({
-      id: nanoid(),
-      content: message,
-      role: "user",
+    return () => {
+      clearTimeout(debounceTimerRef.current);
+    };
+  }, [isLoading, context.chatSuggestionConfiguration]);
+
+  const sendMessage = async (messageContent: string) => {
+    abortSuggestions();
+    setCurrentSuggestions([]);
+
+    const message: Message = new TextMessage({
+      content: messageContent,
+      role: Role.User,
     });
+
+    // Append the message immediately to make it visible
+    appendMessage(message);
+
+    if (onSubmitMessage) {
+      try {
+        await onSubmitMessage(messageContent);
+      } catch (error) {
+        console.error("Error in onSubmitMessage:", error);
+      }
+    }
+
+    return message;
   };
 
-  return (
-    <ChatContextProvider icons={icons} labels={labels} open={openState} setOpen={setOpenState}>
-      {children}
-      <div className={className}>
-        <Button open={openState} setOpen={setOpen}></Button>
-        <Window
-          open={openState}
-          setOpen={setOpen}
-          clickOutsideToClose={clickOutsideToClose}
-          shortcut={shortcut}
-          hitEscapeToClose={hitEscapeToClose}
-        >
-          <Header open={openState} setOpen={setOpen} />
-          <Messages messages={visibleMessages} inProgress={isLoading} />
-          <Input inProgress={isLoading} onSend={sendMessage} isVisible={openState}>
-            {showResponseButton && visibleMessages.length > 0 && (
-              <ResponseButton onClick={isLoading ? stop : reload} inProgress={isLoading} />
-            )}
-          </Input>
-        </Window>
-      </div>
-    </ChatContextProvider>
-  );
+  return {
+    visibleMessages,
+    isLoading,
+    currentSuggestions,
+    sendMessage,
+    stopGeneration,
+    reloadMessages,
+  };
 };

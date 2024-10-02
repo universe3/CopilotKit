@@ -1,5 +1,6 @@
 "use client";
-import { useMakeCopilotReadable } from "@copilotkit/react-core";
+import { useCoAgent, useCopilotAction, useCopilotReadable } from "@copilotkit/react-core";
+import { useCopilotChatSuggestions } from "@copilotkit/react-ui";
 import { useCallback, useMemo, useState } from "react";
 import { Slide } from "./Slide";
 import { Header } from "./Header";
@@ -12,11 +13,33 @@ interface PresentationProps {
 }
 
 export const Presentation = ({ performResearch, setPerformResearch }: PresentationProps) => {
+  // Load messages from local storage
+
+  // const { messages, setMessages } = useCopilotContext();
+
+  // // save to local storage when messages change
+  // useEffect(() => {
+  //   if (messages.length !== 0) {
+  //     localStorage.setItem("copilotkit-messages", JSON.stringify(messages));
+  //   }
+  // }, [JSON.stringify(messages)]);
+
+  // // initially load from local storage
+  // useEffect(() => {
+  //   const messages = localStorage.getItem("copilotkit-messages");
+  //   if (messages) {
+  //     console.log("got messages from local storage", messages);
+  //     setMessages(JSON.parse(messages));
+  //   }
+  // }, []);
+
   const [slides, setSlides] = useState<SlideModel[]>([
     {
       content: "This is the first slide.",
-      backgroundImageDescription: "hello",
+      backgroundImageUrl:
+        "https://loremflickr.com/cache/resized/65535_53415810728_d1db6e2660_h_800_600_nofilter.jpg",
       spokenNarration: "This is the first slide. Welcome to our presentation!",
+      backgroundImageDescription: "A default image placeholder",
     },
   ]);
   const [currentSlideIndex, setCurrentSlideIndex] = useState(0);
@@ -25,12 +48,18 @@ export const Presentation = ({ performResearch, setPerformResearch }: Presentati
   /**
    * This makes all slides available to the Copilot.
    */
-  useMakeCopilotReadable("These are all the slides: " + JSON.stringify(slides));
+  useCopilotReadable({
+    description: "These are all the slides",
+    value: slides,
+  });
 
   /**
    * This makes the current slide available to the Copilot.
    */
-  useMakeCopilotReadable("This is the current slide: " + JSON.stringify(currentSlide));
+  useCopilotReadable({
+    description: "This is the current slide",
+    value: currentSlide,
+  });
 
   /**
    * This action allows the Copilot to append a new slide to the presentation.
@@ -40,6 +69,29 @@ export const Presentation = ({ performResearch, setPerformResearch }: Presentati
     setCurrentSlideIndex,
     slides,
   });
+
+  /**
+   * Auto Suggestions
+   */
+  useCopilotChatSuggestions(
+    {
+      instructions: "Suggest a new slide based on the existing slides.",
+    },
+    [currentSlide],
+  );
+
+  useCopilotChatSuggestions(
+    {
+      instructions:
+        "Suggest specifically what could be improved about the content of current slide. " +
+        "The specific suggestion should be in the button text. " +
+        "Do not suggest to update the background image.",
+      minSuggestions: 0,
+      maxSuggestions: 1,
+      className: "custom-suggestion",
+    },
+    [currentSlide],
+  );
 
   const updateCurrentSlide = useCallback(
     (partialSlide: Partial<SlideModel>) => {

@@ -1,33 +1,33 @@
-import { Message } from "@copilotkit/shared";
+import { Message } from "@copilotkit/runtime-client-gql";
 
-export interface ButtonProps {
-  open: boolean;
-  setOpen: (open: boolean) => void;
-}
+export interface ButtonProps {}
 
 export interface WindowProps {
-  open: boolean;
-  setOpen: (open: boolean) => void;
   clickOutsideToClose: boolean;
   hitEscapeToClose: boolean;
   shortcut: string;
   children?: React.ReactNode;
 }
 
-export interface HeaderProps {
-  open: boolean;
-  setOpen: (open: boolean) => void;
+export interface HeaderProps {}
+
+export interface SuggestionsProps {
+  title: string;
+  message: string;
+  partial?: boolean;
+  className?: string;
+  onClick: (message: string) => void;
 }
 
 export interface MessagesProps {
   messages: Message[];
   inProgress: boolean;
+  children?: React.ReactNode;
 }
 
 export interface InputProps {
   inProgress: boolean;
-  onSend: (text: string) => void;
-  children?: React.ReactNode;
+  onSend: (text: string) => Promise<Message>;
   isVisible?: boolean;
 }
 

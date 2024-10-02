@@ -16,9 +16,9 @@ export default function useUpdateSlide({ partialUpdateSlide }: UpdateSlideParams
         description: "The content of the slide. Should generally consist of a few bullet points.",
       },
       {
-        name: "backgroundImageDescription",
+        name: "backgroundImageUrl",
         description:
-          "What to display in the background of the slide. For example, 'dog', 'house', etc.",
+          "The url of the background image for the slide. Use the getImageUrl tool to retrieve a URL for a topic.",
       },
       {
         name: "spokenNarration",
@@ -26,15 +26,22 @@ export default function useUpdateSlide({ partialUpdateSlide }: UpdateSlideParams
           "The spoken narration for the slide. This is what the user will hear when the slide is shown.",
       },
     ],
-    handler: async ({ content, backgroundImageDescription, spokenNarration }) => {
+    handler: async ({ content, backgroundImageUrl, spokenNarration }) => {
       partialUpdateSlide({
         content,
-        backgroundImageDescription,
+        backgroundImageUrl,
         spokenNarration,
       });
     },
     render: (props) => {
-      return <SlidePreview {...props.args} done={props.status === "complete"} />;
+      return (
+        <SlidePreview
+          {...props.args}
+          done={props.status === "complete"}
+          inProgressLabel="Updating slide..."
+          doneLabel="Slide updated."
+        />
+      );
     },
   });
 }

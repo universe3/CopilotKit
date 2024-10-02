@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
 import * as DefaultIcons from "./Icons";
 
 /**
@@ -52,6 +52,13 @@ export interface CopilotChatIcons {
    * @default <RegenerateIcon />
    */
   regenerateIcon?: React.ReactNode;
+
+  /**
+   * The icons to use for push to talk.
+   * @default <PushToTalkIcon />
+   */
+
+  pushToTalkIcon?: React.ReactNode;
 }
 
 /**
@@ -74,12 +81,6 @@ export interface CopilotChatLabels {
    * @default "Type a message..."
    */
   placeholder?: string;
-
-  /**
-   * The message to display while the chat GPT is "thinking".
-   * @default "Thinking..."
-   */
-  thinking?: string;
 
   /**
    * The message to display when an error occurs.
@@ -140,38 +141,35 @@ export const ChatContextProvider = ({
   open,
   setOpen,
 }: ChatContextProps) => {
-  const context = useMemo(
-    () => ({
-      labels: {
-        ...{
-          initial: "",
-          title: "CopilotKit",
-          placeholder: "Type a message...",
-          thinking: "Thinking...",
-          error: "❌ An error occurred. Please try again.",
-          stopGenerating: "Stop generating",
-          regenerateResponse: "Regenerate response",
-        },
-        ...labels,
+  const context = {
+    labels: {
+      ...{
+        initial: "",
+        title: "CopilotKit",
+        placeholder: "Type a message...",
+        error: "❌ An error occurred. Please try again.",
+        stopGenerating: "Stop generating",
+        regenerateResponse: "Regenerate response",
       },
+      ...labels,
+    },
 
-      icons: {
-        ...{
-          openIcon: DefaultIcons.OpenIcon,
-          closeIcon: DefaultIcons.CloseIcon,
-          headerCloseIcon: DefaultIcons.HeaderCloseIcon,
-          sendIcon: DefaultIcons.SendIcon,
-          activityIcon: DefaultIcons.ActivityIcon,
-          spinnerIcon: DefaultIcons.SpinnerIcon,
-          stopIcon: DefaultIcons.StopIcon,
-          regenerateIcon: DefaultIcons.RegenerateIcon,
-        },
-        icons,
+    icons: {
+      ...{
+        openIcon: DefaultIcons.OpenIcon,
+        closeIcon: DefaultIcons.CloseIcon,
+        headerCloseIcon: DefaultIcons.HeaderCloseIcon,
+        sendIcon: DefaultIcons.SendIcon,
+        activityIcon: DefaultIcons.ActivityIcon,
+        spinnerIcon: DefaultIcons.SpinnerIcon,
+        stopIcon: DefaultIcons.StopIcon,
+        regenerateIcon: DefaultIcons.RegenerateIcon,
+        pushToTalkIcon: DefaultIcons.PushToTalkIcon,
       },
-      open,
-      setOpen,
-    }),
-    [labels, icons, open, setOpen],
-  );
+      ...icons,
+    },
+    open,
+    setOpen,
+  };
   return <ChatContext.Provider value={context}>{children}</ChatContext.Provider>;
 };

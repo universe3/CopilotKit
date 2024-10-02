@@ -1,15 +1,16 @@
 import React, { useCallback, useEffect } from "react";
 import { WindowProps } from "./props";
+import { useChatContext } from "./ChatContext";
 
 export const Window = ({
-  open,
-  setOpen,
   children,
   clickOutsideToClose,
   shortcut,
   hitEscapeToClose,
 }: WindowProps) => {
   const windowRef = React.useRef<HTMLDivElement>(null);
+
+  const { open, setOpen } = useChatContext();
 
   const handleClickOutside = useCallback(
     (event: MouseEvent) => {
@@ -19,7 +20,18 @@ export const Window = ({
 
       const parentElement = windowRef.current?.parentElement;
 
-      if (open && parentElement && !parentElement.contains(event.target as any)) {
+      let className = "";
+      if (event.target instanceof HTMLElement) {
+        className = event.target.className;
+      }
+
+      if (
+        open &&
+        parentElement &&
+        !parentElement.contains(event.target as any) &&
+        // prevent closing the window when clicking on the debug menu
+        !className.includes("copilotKitDebugMenu")
+      ) {
         setOpen(false);
       }
     },
